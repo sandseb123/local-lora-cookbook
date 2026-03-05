@@ -109,7 +109,7 @@ def _call_annotator(prompt: str, api_key: str,
         data=payload,
         headers={
             "x-api-key":          api_key,
-            "anthropic-version":  "2023-06-01",
+            "anthropic-version":  "2024-06-01",
             "content-type":       "application/json",
         },
         method="POST",
@@ -133,12 +133,11 @@ def run_collect(domain, db_path: str, out_dir: Path) -> Path:
     already_done: set[str] = set()
     if out_path.exists():
         with open(out_path) as f:
-            for line_num, line in enumerate(f, 1):
+            for line in f:
                 try:
                     already_done.add(json.loads(line)["question"])
-                except (json.JSONDecodeError, KeyError):
-                    print(f"  warning: skipping malformed line {line_num} "
-                          f"in {out_path.name}")
+                except Exception:
+                    pass
 
     # Warm up Ollama
     from lora_cookbook.llm import ollama_client
@@ -214,24 +213,22 @@ def run_annotate(domain, raw_path: Path, out_dir: Path,
     already_annotated: set[str] = set()
     if training_path.exists():
         with open(training_path) as f:
-            for line_num, line in enumerate(f, 1):
+            for line in f:
                 try:
                     obj = json.loads(line)
                     q = obj["messages"][0].get("_question", "")
                     if q:
                         already_annotated.add(q)
-                except (json.JSONDecodeError, KeyError):
-                    print(f"  warning: skipping malformed line {line_num} "
-                          f"in {training_path.name}")
+                except Exception:
+                    pass
 
     raw_examples: list[dict] = []
     with open(raw_path) as f:
-        for line_num, line in enumerate(f, 1):
+        for line in f:
             try:
                 raw_examples.append(json.loads(line.strip()))
-            except (json.JSONDecodeError, KeyError):
-                print(f"  warning: skipping malformed line {line_num} "
-                      f"in {raw_path.name}")
+            except Exception:
+                pass
 
     print(f"\nPhase 2: annotating {len(raw_examples)} examples with {model}")
     success = skipped = errors = 0
@@ -263,7 +260,7 @@ def run_annotate(domain, raw_path: Path, out_dir: Path,
                                                   model=model)
                     break
                 except Exception as e:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    wait = 2 ** (attempt + 1)
                     if attempt < _MAX_RETRIES - 1:
                         print(f"-> retry {attempt + 1}/{_MAX_RETRIES} "
                               f"(waiting {wait}s): {e}", end=" ", flush=True)
