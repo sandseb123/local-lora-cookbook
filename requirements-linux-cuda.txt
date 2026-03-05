@@ -1,0 +1,10 @@
+# Linux / NVIDIA GPU — uses Unsloth + TRL for training
+unsloth
+trl>=0.8.0
+datasets>=2.18.0
+transformers>=4.40.0
+accelerate>=0.28.0
+bitsandbytes>=0.43.0
+
+# Optional: Anthropic SDK for annotation step (Phase 2)
+anthropic>=0.25.0

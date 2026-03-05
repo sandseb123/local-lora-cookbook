@@ -1,0 +1,6 @@
+# Apple Silicon (M-series Mac) — uses mlx-lm for training and inference
+mlx-lm>=0.19.0
+
+# Optional: Anthropic SDK for annotation step (Phase 2)
+# Script also works without this via raw urllib fallback
+anthropic>=0.25.0

@@ -1,0 +1,33 @@
+# Training data — may contain personal/private data, never commit
+**/training_data/raw_examples.jsonl
+**/training_data/training_data.jsonl
+**/training_data/lora-output/
+**/training_data/*.gguf
+**/training_data/data/
+
+# Real databases — never commit personal data
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Env / secrets
+.env
+*.env.local
