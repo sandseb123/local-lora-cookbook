@@ -3,11 +3,9 @@
 LoRA Fine-Tuning Script
 =======================
 Fine-tunes any Qwen/Llama-family model on your gold-standard coaching examples.
-
 Backend is chosen automatically:
   Apple Silicon (M-series Mac)  ->  mlx-lm   (pip install mlx-lm)
   Linux / NVIDIA GPU            ->  Unsloth  (pip install unsloth trl datasets)
-
 Usage
 -----
   python3 scripts/train_lora.py --data examples/finance_coach/training_data/training_data.jsonl
@@ -16,7 +14,6 @@ Usage
   python3 scripts/train_lora.py --serve
   python3 scripts/train_lora.py --gguf --ollama-model finance-coach
 """
-
 from __future__ import annotations
 
 import argparse
@@ -45,14 +42,12 @@ DEFAULTS = {
     "grad_accum": 4, "steps_per_report": 10, "steps_per_eval": 50,
     "save_every": 100, "seed": 42, "val_split": 0.15,
 }
-
 OVERNIGHT = {
     "iters": 2000, "batch_size": 4, "lora_layers": 16, "lora_rank": 16,
     "lora_alpha": 32, "learning_rate": 5e-5, "max_seq_length": 2048,
     "grad_accum": 4, "steps_per_report": 20, "steps_per_eval": 100,
     "save_every": 200, "seed": 42, "val_split": 0.15,
 }
-
 LOW_MEMORY = {
     "iters": 400, "batch_size": 1, "lora_layers": 4, "lora_rank": 4,
     "lora_alpha": 8, "learning_rate": 1e-4, "max_seq_length": 512,
@@ -92,10 +87,12 @@ def prepare_data(data_path: Path, out_dir: Path, val_split: float,
     n_test = max(1, min(5, n_val))
 
     if len(examples) - n_val - n_test < 5:
+        print(f"  WARNING: Only {len(examples)} examples — using all for "
+              f"training with duplicated validation subset.")
         splits = {
             "train": examples,
             "valid": examples[:min(3, len(examples))],
-            "test":  examples[:min(2, len(examples))],
+            "test":  [],
         }
     else:
         splits = {
@@ -178,11 +175,13 @@ def run_gguf_mlx(model: str, adapter_dir: Path, gguf_path: Path,
                  ollama_model: str = "my-coach") -> None:
     if not fused_dir.exists():
         run_fuse_mlx(model, adapter_dir, fused_dir)
+
     converter = shutil.which("llama-convert-hf-to-gguf") or \
                 shutil.which("convert-hf-to-gguf")
     if not converter:
         print("ERROR: llama.cpp not found. Install with: brew install llama.cpp")
         sys.exit(1)
+
     gguf_path.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run([converter, str(fused_dir),
                              "--outfile", str(gguf_path), "--outtype", "q4_k_m"])
@@ -272,10 +271,17 @@ def run_gguf_unsloth(model: str, adapter_dir: Path, gguf_path: Path,
     gguf_base = str(gguf_path.parent / ollama_model)
     model_obj.save_pretrained_gguf(gguf_base, tokenizer,
                                    quantization_method="q4_k_m")
+
     actual_gguf = Path(gguf_base + ".gguf")
     if not actual_gguf.exists():
         candidates = list(Path(gguf_base).parent.glob(f"{ollama_model}*.gguf"))
-        actual_gguf = candidates[0] if candidates else actual_gguf
+        if candidates:
+            actual_gguf = candidates[0]
+        else:
+            print(f"ERROR: GGUF file not found at {actual_gguf}")
+            print(f"  Check {gguf_path.parent} for the generated .gguf file")
+            sys.exit(1)
+
     _register_with_ollama(actual_gguf, ollama_model, system_prompt)
 
 
@@ -287,8 +293,10 @@ def _register_with_ollama(gguf_path: Path, ollama_model: str,
     if not ollama_bin:
         print("ERROR: ollama not found on PATH.")
         sys.exit(1)
+
     modelfile = gguf_path.parent / "Modelfile"
-    system_line = f'SYSTEM "{system_prompt}"\n' if system_prompt else ""
+    escaped_prompt = system_prompt.replace('"', '\\"')
+    system_line = f'SYSTEM "{escaped_prompt}"\n' if system_prompt else ""
     modelfile.write_text(
         f"FROM {gguf_path.resolve()}\n{system_line}"
         f"PARAMETER temperature 0.7\nPARAMETER top_p 0.9\n"
@@ -343,6 +351,11 @@ def main() -> None:
                    "--max-tokens", "300",
                    "--prompt", "How much did I spend last month overall?"]
             subprocess.run(cmd)
+        else:
+            print("ERROR: --test is only supported on Apple Silicon (mlx-lm).")
+            print("On Linux, test via Ollama after --gguf:")
+            print(f"  ollama run {args.ollama_model} \"How much did I spend last month?\"")
+            sys.exit(1)
         return
 
     if args.fuse:
