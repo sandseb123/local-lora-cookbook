@@ -92,7 +92,7 @@ def _generate_sql(question: str, model: str, timeout: int = 60) -> str:
 
 
 def _run_sql(sql: str, db_path: str) -> list[dict]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(sql)
@@ -106,7 +106,7 @@ def _get_budget_context(categories: list[str], db_path: str) -> str:
     if not categories:
         return ""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         placeholders = ",".join("?" * len(categories))
         rows = conn.execute(
             f"SELECT category, monthly_limit FROM budgets "
