@@ -133,11 +133,12 @@ def run_collect(domain, db_path: str, out_dir: Path) -> Path:
     already_done: set[str] = set()
     if out_path.exists():
         with open(out_path) as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 try:
                     already_done.add(json.loads(line)["question"])
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, KeyError):
+                    print(f"  warning: skipping malformed line {line_num} "
+                          f"in {out_path.name}")
 
     # Warm up Ollama
     from lora_cookbook.llm import ollama_client
@@ -198,6 +199,8 @@ def run_collect(domain, db_path: str, out_dir: Path) -> Path:
 
 # ── Phase 2: annotate ─────────────────────────────────────────────────────────
 
+_MAX_RETRIES = 3
+
 def run_annotate(domain, raw_path: Path, out_dir: Path,
                  api_key: str, model: str = "claude-sonnet-4-6",
                  delay: float = 0.5) -> Path:
@@ -211,22 +214,24 @@ def run_annotate(domain, raw_path: Path, out_dir: Path,
     already_annotated: set[str] = set()
     if training_path.exists():
         with open(training_path) as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 try:
                     obj = json.loads(line)
                     q = obj["messages"][0].get("_question", "")
                     if q:
                         already_annotated.add(q)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, KeyError):
+                    print(f"  warning: skipping malformed line {line_num} "
+                          f"in {training_path.name}")
 
     raw_examples: list[dict] = []
     with open(raw_path) as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             try:
                 raw_examples.append(json.loads(line.strip()))
-            except Exception:
-                pass
+            except (json.JSONDecodeError, KeyError):
+                print(f"  warning: skipping malformed line {line_num} "
+                      f"in {raw_path.name}")
 
     print(f"\nPhase 2: annotating {len(raw_examples)} examples with {model}")
     success = skipped = errors = 0
@@ -251,13 +256,23 @@ def run_annotate(domain, raw_path: Path, out_dir: Path,
                 llama_answer=ex["llama_answer"],
             )
 
-            try:
-                gold_answer = _call_annotator(annotation_prompt, api_key,
-                                              model=model)
-            except Exception as e:
-                print(f"-> API error: {e}")
+            gold_answer = None
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    gold_answer = _call_annotator(annotation_prompt, api_key,
+                                                  model=model)
+                    break
+                except Exception as e:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    if attempt < _MAX_RETRIES - 1:
+                        print(f"-> retry {attempt + 1}/{_MAX_RETRIES} "
+                              f"(waiting {wait}s): {e}", end=" ", flush=True)
+                        time.sleep(wait)
+                    else:
+                        print(f"-> FAILED after {_MAX_RETRIES} attempts: {e}")
+
+            if gold_answer is None:
                 errors += 1
-                time.sleep(2)
                 continue
 
             training_record = {

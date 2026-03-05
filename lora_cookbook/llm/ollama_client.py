@@ -19,6 +19,7 @@ Zero outbound network calls — both backends run entirely on your device.
 
 import json
 import socket
+import sys
 import urllib.request
 import urllib.error
 
@@ -27,13 +28,15 @@ OLLAMA_BASE   = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "qwen3.5:4b"
 
 
+# ── Backend detection ─────────────────────────────────────────────────────────
+
 def _mlx_is_running() -> bool:
+    """Return True only if the mlx-lm server responds successfully."""
     try:
-        urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=1)
-        return True
-    except urllib.error.HTTPError:
-        return True
-    except Exception:
+        with urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=1) as r:
+            return r.status == 200
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            socket.timeout, TimeoutError, OSError):
         return False
 
 
@@ -50,8 +53,15 @@ def _ollama_is_running() -> bool:
 
 
 def list_models() -> list[str]:
+    """List available models. Queries mlx-lm or Ollama."""
     if _mlx_is_running():
-        return ["my-coach"]
+        try:
+            with urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=3) as r:
+                data = json.loads(r.read())
+                models = data.get("data", [])
+                return [m.get("id", "default") for m in models] if models else ["default"]
+        except Exception:
+            return ["default"]
     try:
         with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=5) as r:
             data = json.loads(r.read())
@@ -61,8 +71,16 @@ def list_models() -> list[str]:
 
 
 def best_model(fine_tuned_name: str | None = None) -> str:
+    """
+    Return the best available local model name.
+    mlx_lm server takes priority (serves the fine-tuned model).
+    Falls back to Ollama preference order.
+
+    Pass fine_tuned_name to prioritise your domain-specific model,
+    e.g. best_model("finance-coach").
+    """
     if _mlx_is_running():
-        return fine_tuned_name or "my-coach"
+        return fine_tuned_name or "default"
     models = list_models()
     if not models:
         return DEFAULT_MODEL
@@ -78,6 +96,8 @@ def best_model(fine_tuned_name: str | None = None) -> str:
     return models[0]
 
 
+# ── mlx_lm backend (OpenAI-compatible) ───────────────────────────────────────
+
 def _mlx_chat(messages: list[dict], timeout: int = 120,
               max_tokens: int = 350, temperature: float | None = None) -> str:
     body: dict = {
@@ -89,6 +109,7 @@ def _mlx_chat(messages: list[dict], timeout: int = 120,
     if temperature is not None:
         body["temperature"] = temperature
     payload = json.dumps(body).encode()
+
     req = urllib.request.Request(
         f"{MLX_LM_BASE}/v1/chat/completions",
         data=payload,
@@ -109,6 +130,8 @@ def _mlx_chat(messages: list[dict], timeout: int = 120,
         )
 
 
+# ── Ollama backend ────────────────────────────────────────────────────────────
+
 def _ollama_chat(messages: list[dict], model: str, timeout: int,
                  num_predict: int = 350, num_ctx: int = 16384,
                  temperature: float | None = None) -> str:
@@ -122,6 +145,7 @@ def _ollama_chat(messages: list[dict], model: str, timeout: int,
         "num_predict": num_predict,
         "options":     opts,
     }).encode()
+
     req = urllib.request.Request(
         f"{OLLAMA_BASE}/api/chat",
         data=payload,
@@ -143,17 +167,22 @@ def _ollama_chat(messages: list[dict], model: str, timeout: int,
         )
 
 
+# ── Public API ────────────────────────────────────────────────────────────────
+
 def chat(prompt: str, model: str = DEFAULT_MODEL, system: str = "",
          timeout: int = 90) -> str:
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+
     if _mlx_is_running():
         try:
             return _mlx_chat(messages, timeout=timeout)
         except RuntimeError:
-            pass
+            print("  [ollama_client] mlx-lm failed, falling back to Ollama",
+                  file=sys.stderr)
+
     payload = json.dumps({
         "model":       model,
         "prompt":      prompt,
@@ -188,22 +217,28 @@ def chat_with_history(messages: list[dict], model: str = DEFAULT_MODEL,
     if system:
         full_messages.append({"role": "system", "content": system})
     full_messages.extend(messages)
+
     if _mlx_is_running():
         try:
             return _mlx_chat(full_messages, timeout=timeout)
         except RuntimeError:
-            pass
+            print("  [ollama_client] mlx-lm failed, falling back to Ollama",
+                  file=sys.stderr)
+
     return _ollama_chat(full_messages, model=model, timeout=timeout)
 
 
 def chat_sql(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 180) -> str:
     """Lightweight call for SQL generation — small token budget, temperature=0."""
     messages = [{"role": "user", "content": prompt}]
+
     if _mlx_is_running():
         try:
             return _mlx_chat(messages, timeout=timeout, max_tokens=120, temperature=0)
         except RuntimeError:
-            pass
+            print("  [ollama_client] mlx-lm failed, falling back to Ollama",
+                  file=sys.stderr)
+
     payload = json.dumps({
         "model":       model,
         "prompt":      prompt,
@@ -231,6 +266,8 @@ def chat_sql(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 180) -> str
             f"(detail: {e})"
         )
 
+
+# ── Streaming helpers ─────────────────────────────────────────────────────────
 
 def _mlx_stream(messages: list[dict], timeout: int = 120, max_tokens: int = 350):
     payload = json.dumps({
@@ -261,8 +298,8 @@ def _mlx_stream(messages: list[dict], timeout: int = 120, max_tokens: int = 350)
                         yield token
                 except (json.JSONDecodeError, KeyError):
                     pass
-    except (socket.timeout, TimeoutError, urllib.error.URLError):
-        pass
+    except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
+        yield f"\n[stream error: {e}]"
 
 
 def _ollama_stream(messages: list[dict], model: str, timeout: int,
@@ -292,8 +329,8 @@ def _ollama_stream(messages: list[dict], model: str, timeout: int,
                         break
                 except (json.JSONDecodeError, KeyError):
                     pass
-    except (socket.timeout, TimeoutError, urllib.error.URLError):
-        pass
+    except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
+        yield f"\n[stream error: {e}]"
 
 
 def stream_chat(messages: list[dict], model: str = DEFAULT_MODEL,
@@ -303,9 +340,11 @@ def stream_chat(messages: list[dict], model: str = DEFAULT_MODEL,
     if system:
         full_messages.append({"role": "system", "content": system})
     full_messages.extend(messages)
+
     if _mlx_is_running():
         tokens = list(_mlx_stream(full_messages, timeout=timeout))
         if tokens:
             yield from tokens
             return
+
     yield from _ollama_stream(full_messages, model=model, timeout=timeout)
