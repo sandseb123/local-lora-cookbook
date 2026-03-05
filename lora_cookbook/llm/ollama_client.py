@@ -31,12 +31,10 @@ DEFAULT_MODEL = "qwen3.5:4b"
 # ── Backend detection ─────────────────────────────────────────────────────────
 
 def _mlx_is_running() -> bool:
-    """Return True only if the mlx-lm server responds successfully."""
     try:
-        with urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=1) as r:
-            return r.status == 200
-    except (urllib.error.HTTPError, urllib.error.URLError,
-            socket.timeout, TimeoutError, OSError):
+        urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=1)
+        return True
+    except Exception:
         return False
 
 
@@ -53,7 +51,6 @@ def _ollama_is_running() -> bool:
 
 
 def list_models() -> list[str]:
-    """List available models. Queries mlx-lm or Ollama."""
     if _mlx_is_running():
         try:
             with urllib.request.urlopen(f"{MLX_LM_BASE}/v1/models", timeout=3) as r:
@@ -183,32 +180,7 @@ def chat(prompt: str, model: str = DEFAULT_MODEL, system: str = "",
             print("  [ollama_client] mlx-lm failed, falling back to Ollama",
                   file=sys.stderr)
 
-    payload = json.dumps({
-        "model":       model,
-        "prompt":      prompt,
-        "system":      system,
-        "stream":      False,
-        "num_predict": 350,
-    }).encode()
-    req = urllib.request.Request(
-        f"{OLLAMA_BASE}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read())
-            return data.get("response", "").strip()
-    except (socket.timeout, TimeoutError) as e:
-        raise RuntimeError(f"Ollama request timed out after {timeout}s: {e}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"No LLM backend running. Start one of:\n"
-            f"  Fine-tuned model: python scripts/train_lora.py --serve\n"
-            f"  Ollama:           ollama serve\n"
-            f"(detail: {e})"
-        )
+    return _ollama_chat(messages, model=model, timeout=timeout)
 
 
 def chat_with_history(messages: list[dict], model: str = DEFAULT_MODEL,
@@ -239,32 +211,8 @@ def chat_sql(prompt: str, model: str = DEFAULT_MODEL, timeout: int = 180) -> str
             print("  [ollama_client] mlx-lm failed, falling back to Ollama",
                   file=sys.stderr)
 
-    payload = json.dumps({
-        "model":       model,
-        "prompt":      prompt,
-        "stream":      False,
-        "num_predict": 120,
-        "options":     {"num_ctx": 4096, "temperature": 0},
-    }).encode()
-    req = urllib.request.Request(
-        f"{OLLAMA_BASE}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read())
-            return data.get("response", "").strip()
-    except (socket.timeout, TimeoutError) as e:
-        raise RuntimeError(f"Ollama request timed out after {timeout}s: {e}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"No LLM backend running. Start one of:\n"
-            f"  Fine-tuned model: python scripts/train_lora.py --serve\n"
-            f"  Ollama:           ollama serve\n"
-            f"(detail: {e})"
-        )
+    return _ollama_chat(messages, model=model, timeout=timeout,
+                        num_predict=120, num_ctx=4096, temperature=0)
 
 
 # ── Streaming helpers ─────────────────────────────────────────────────────────
@@ -299,7 +247,7 @@ def _mlx_stream(messages: list[dict], timeout: int = 120, max_tokens: int = 350)
                 except (json.JSONDecodeError, KeyError):
                     pass
     except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
-        yield f"\n[stream error: {e}]"
+        print(f"  [ollama_client] mlx-lm stream error: {e}", file=sys.stderr)
 
 
 def _ollama_stream(messages: list[dict], model: str, timeout: int,
@@ -330,7 +278,7 @@ def _ollama_stream(messages: list[dict], model: str, timeout: int,
                 except (json.JSONDecodeError, KeyError):
                     pass
     except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
-        yield f"\n[stream error: {e}]"
+        print(f"  [ollama_client] Ollama stream error: {e}", file=sys.stderr)
 
 
 def stream_chat(messages: list[dict], model: str = DEFAULT_MODEL,
