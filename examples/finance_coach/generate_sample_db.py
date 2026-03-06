@@ -18,6 +18,9 @@ SCHEMA = Path(__file__).parent / "schema.sql"
 
 
 def _create_db(db_path: str) -> sqlite3.Connection:
+    p = Path(db_path)
+    if p.exists():
+        p.unlink()
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA.read_text())
     return conn
