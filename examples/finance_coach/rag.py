@@ -87,6 +87,8 @@ SYSTEM_PROMPT = (
 def _generate_sql(question: str, model: str, timeout: int = 60) -> str:
     prompt = _SQL_PROMPT.format(schema=_SCHEMA, question=question)
     raw = ollama_client.chat_sql(prompt, model=model, timeout=timeout)
+    # Strip Qwen3 <think>...</think> reasoning blocks before extracting SQL
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     raw = re.sub(r"```(?:sql)?\s*", "", raw).strip().rstrip("`").strip()
     return raw
 
@@ -96,7 +98,7 @@ def _run_sql(sql: str, db_path: str) -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(sql)
-        return [dict(r) for r in cursor.fetchall()]
+        return [dict(r) for r in cursor.fetchmany(200)]
     finally:
         conn.close()
 
@@ -107,17 +109,19 @@ def _get_budget_context(categories: list[str], db_path: str) -> str:
         return ""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        placeholders = ",".join("?" * len(categories))
-        rows = conn.execute(
-            f"SELECT category, monthly_limit FROM budgets "
-            f"WHERE category IN ({placeholders})",
-            categories,
-        ).fetchall()
-        conn.close()
-        if not rows:
-            return ""
-        lines = ["Budget limits:"] + [f"  {r[0]}: ${r[1]:.0f}/month" for r in rows]
-        return "\n".join(lines) + "\n\n"
+        try:
+            placeholders = ",".join("?" * len(categories))
+            rows = conn.execute(
+                f"SELECT category, monthly_limit FROM budgets "
+                f"WHERE category IN ({placeholders})",
+                categories,
+            ).fetchall()
+            if not rows:
+                return ""
+            lines = ["Budget limits:"] + [f"  {r[0]}: ${r[1]:.0f}/month" for r in rows]
+            return "\n".join(lines) + "\n\n"
+        finally:
+            conn.close()
     except Exception:
         return ""
 
@@ -136,6 +140,11 @@ def answer(question: str, db_path: str, timeout: int = 300) -> dict:
         sql = _generate_sql(question, model=model)
     except Exception as e:
         return {"sql": "", "rows": [], "answer": "", "error": str(e),
+                "context_section": "", "full_prompt": ""}
+
+    if not sql:
+        return {"sql": "", "rows": [], "answer": "",
+                "error": "LLM returned no SQL",
                 "context_section": "", "full_prompt": ""}
 
     # Step 2: Execute SQL
