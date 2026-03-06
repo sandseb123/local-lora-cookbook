@@ -192,3 +192,7 @@ Any HuggingFace causal LM works. Pass `--model your/model` to override.
 ## License
 
 MIT
+
+Built with Claude as a coding assistant. 
+All architecture decisions, testing, and 
+validation are my own.
