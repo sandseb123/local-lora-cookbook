@@ -55,6 +55,14 @@ python3 scripts/generate_training_data.py \
   --phase annotate \
   --key sk-ant-...
 
+# Or annotate with MiniMax (alternative, 204K context window)
+python3 scripts/generate_training_data.py \
+  --domain examples/finance_coach \
+  --db ~/finance.db \
+  --phase annotate \
+  --provider minimax \
+  --key <your-minimax-key>
+
 # Train the LoRA adapter (~15-40 min on M4, ~10-25 min on RTX 3090)
 python3 scripts/train_lora.py \
   --data examples/finance_coach/training_data/training_data.jsonl \
@@ -182,10 +190,23 @@ Default base model: **Qwen/Qwen3.5-4B-Instruct**
 
 Any HuggingFace causal LM works. Pass `--model your/model` to override.
 
+## Annotation providers
+
+Phase 2 supports multiple cloud LLM providers for annotation. Use `--provider`
+to switch between them:
+
+| Provider | Flag | Default model | Env var |
+|---|---|---|---|
+| Anthropic (default) | `--provider anthropic` | claude-sonnet-4-6 | `ANTHROPIC_API_KEY` |
+| MiniMax | `--provider minimax` | MiniMax-M2.5 | `MINIMAX_API_KEY` |
+| OpenAI | `--provider openai` | gpt-4o-mini | `OPENAI_API_KEY` |
+
+You can also pass `--base-url` to point at any OpenAI-compatible endpoint.
+
 ## Cost
 
 - **Phase 1 (collect)**: free — runs entirely locally via Ollama
-- **Phase 2 (annotate)**: ~$2-5 for ~100 examples via Claude Sonnet
+- **Phase 2 (annotate)**: ~$2-5 for ~100 examples (varies by provider)
 - **Training**: free — runs on your local GPU/CPU
 - **Inference**: free — serves from your device indefinitely
 
