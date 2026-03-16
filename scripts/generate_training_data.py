@@ -11,8 +11,9 @@ Phase 1 — collect
   Output → training_data/raw_examples.jsonl
 
 Phase 2 — annotate
-  Sends each raw example to Claude (claude-sonnet-4-6) with the full data
-  context. Claude writes a gold-standard coaching answer in your app's style.
+  Sends each raw example to a cloud LLM with the full data context.
+  The LLM writes a gold-standard coaching answer in your app's style.
+  Supports Anthropic (default), MiniMax, and OpenAI as annotation providers.
   Output → training_data/training_data.jsonl  (TRL / Unsloth chat format)
 
 Usage
@@ -20,8 +21,11 @@ Usage
   # Phase 1 only (Ollama must be running, no API key needed):
   python3 scripts/generate_training_data.py --domain examples/finance_coach --db ~/finance.db
 
-  # Phase 1 then 2 (annotate immediately after):
+  # Phase 1 then 2 with Claude (annotate immediately after):
   python3 scripts/generate_training_data.py --domain examples/finance_coach --db ~/finance.db --phase both --key sk-ant-...
+
+  # Phase 2 with MiniMax (often cheaper, 204K context):
+  python3 scripts/generate_training_data.py --domain examples/finance_coach --phase annotate --provider minimax --key <minimax-key>
 
   # Phase 2 only (raw_examples.jsonl already exists):
   python3 scripts/generate_training_data.py --domain examples/finance_coach --phase annotate --key sk-ant-...
@@ -79,14 +83,19 @@ def _load_domain(domain_dir: str) -> types.ModuleType:
     return mod
 
 
-# ── Claude annotator ─────────────────────────────────────────────────────────
+# ── Annotator backends ───────────────────────────────────────────────────────
 
-def _call_annotator(prompt: str, api_key: str,
+# Provider presets: (default_model, base_url, env_var)
+_PROVIDER_DEFAULTS: dict[str, tuple[str, str, str]] = {
+    "anthropic": ("claude-sonnet-4-6", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    "minimax":   ("MiniMax-M2.5",      "https://api.minimax.io/v1", "MINIMAX_API_KEY"),
+    "openai":    ("gpt-4o-mini",       "https://api.openai.com/v1", "OPENAI_API_KEY"),
+}
+
+
+def _call_anthropic(prompt: str, api_key: str,
                     model: str = "claude-sonnet-4-6") -> str:
-    """
-    Call the Anthropic Messages API to get a gold-standard annotation.
-    Uses the anthropic SDK if installed, otherwise falls back to raw urllib.
-    """
+    """Call the Anthropic Messages API."""
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -117,6 +126,74 @@ def _call_annotator(prompt: str, api_key: str,
     with urllib.request.urlopen(req, timeout=60) as resp:
         body = json.loads(resp.read())
     return body["content"][0]["text"].strip()
+
+
+def _call_openai_compatible(prompt: str, api_key: str,
+                            model: str, base_url: str) -> str:
+    """
+    Call any OpenAI-compatible chat completions API.
+
+    Works with OpenAI, MiniMax, and other providers that implement
+    the /v1/chat/completions (or /chat/completions) endpoint.
+    """
+    # Normalise: ensure base_url ends without trailing slash
+    base_url = base_url.rstrip("/")
+    # Build endpoint — append /chat/completions if the URL doesn't already
+    # contain the full path (e.g. bare "https://api.minimax.io/v1").
+    if base_url.endswith("/v1"):
+        endpoint = f"{base_url}/chat/completions"
+    elif base_url.endswith("/chat/completions"):
+        endpoint = base_url
+    else:
+        endpoint = f"{base_url}/v1/chat/completions"
+
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content.strip()
+    except ImportError:
+        pass
+
+    payload = json.dumps({
+        "model":      model,
+        "max_tokens": 600,
+        "messages":   [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        body = json.loads(resp.read())
+    return body["choices"][0]["message"]["content"].strip()
+
+
+def _call_annotator(prompt: str, api_key: str,
+                    model: str = "claude-sonnet-4-6",
+                    provider: str = "anthropic",
+                    base_url: str = "") -> str:
+    """
+    Route annotation requests to the chosen provider.
+
+    Supported providers:
+      anthropic  — Anthropic Messages API (default)
+      minimax    — MiniMax OpenAI-compatible API
+      openai     — OpenAI Chat Completions API
+    """
+    if provider == "anthropic":
+        return _call_anthropic(prompt, api_key, model=model)
+    return _call_openai_compatible(prompt, api_key, model=model,
+                                   base_url=base_url)
 
 
 # ── Phase 1: collect ─────────────────────────────────────────────────────────
@@ -202,7 +279,8 @@ _MAX_RETRIES = 3
 
 def run_annotate(domain, raw_path: Path, out_dir: Path,
                  api_key: str, model: str = "claude-sonnet-4-6",
-                 delay: float = 0.5) -> Path:
+                 delay: float = 0.5, provider: str = "anthropic",
+                 base_url: str = "") -> Path:
     """
     Read raw_examples.jsonl, call Claude to write gold-standard answers,
     and write training_data.jsonl in TRL/Unsloth chat format.
@@ -257,7 +335,9 @@ def run_annotate(domain, raw_path: Path, out_dir: Path,
             for attempt in range(_MAX_RETRIES):
                 try:
                     gold_answer = _call_annotator(annotation_prompt, api_key,
-                                                  model=model)
+                                                  model=model,
+                                                  provider=provider,
+                                                  base_url=base_url)
                     break
                 except Exception as e:
                     wait = 2 ** (attempt + 1)
@@ -346,14 +426,27 @@ def main() -> None:
         help="Shorthand for --phase both",
     )
     parser.add_argument(
+        "--provider",
+        choices=list(_PROVIDER_DEFAULTS.keys()),
+        default="anthropic",
+        help="LLM provider for annotation (default: anthropic)",
+    )
+    parser.add_argument(
         "--key",
-        default=os.environ.get("ANTHROPIC_API_KEY", ""),
-        help="Anthropic API key (or set ANTHROPIC_API_KEY env var)",
+        default="",
+        help="API key for the annotation provider "
+             "(or set ANTHROPIC_API_KEY / MINIMAX_API_KEY / OPENAI_API_KEY)",
     )
     parser.add_argument(
         "--model",
-        default="claude-sonnet-4-6",
-        help="Claude model for annotation (default: claude-sonnet-4-6)",
+        default="",
+        help="Model name for annotation (defaults per provider: "
+             "claude-sonnet-4-6, MiniMax-M2.5, gpt-4o-mini)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help="Custom base URL for OpenAI-compatible providers",
     )
     parser.add_argument(
         "--delay",
@@ -367,6 +460,13 @@ def main() -> None:
     domain  = _load_domain(args.domain)
     out_dir = Path(args.out) if args.out else Path(args.domain) / "training_data"
 
+    # Resolve provider defaults
+    provider = args.provider
+    default_model, default_base_url, env_var = _PROVIDER_DEFAULTS[provider]
+    ann_model   = args.model    or default_model
+    ann_key     = args.key      or os.environ.get(env_var, "")
+    ann_base_url = args.base_url or default_base_url
+
     print("=" * 60)
     print("LoRA Training Data Generator")
     print("=" * 60)
@@ -375,6 +475,8 @@ def main() -> None:
     print(f"Output:    {out_dir.resolve()}")
     print(f"Phase:     {phase}")
     print(f"Questions: {len(domain.QUESTIONS)}")
+    if phase in ("annotate", "both"):
+        print(f"Provider:  {provider} ({ann_model})")
     print()
 
     raw_path = out_dir / "raw_examples.jsonl"
@@ -390,15 +492,16 @@ def main() -> None:
         raw_path = run_collect(domain, args.db, out_dir)
 
     if phase in ("annotate", "both"):
-        if not args.key:
-            print("ERROR: Anthropic API key required for annotation.")
-            print("  Pass --key sk-ant-... or set ANTHROPIC_API_KEY")
+        if not ann_key:
+            print(f"ERROR: API key required for annotation ({provider}).")
+            print(f"  Pass --key <your-key> or set {env_var}")
             sys.exit(1)
         if not raw_path.exists():
             print(f"ERROR: {raw_path} not found. Run Phase 1 first.")
             sys.exit(1)
-        run_annotate(domain, raw_path, out_dir, args.key,
-                     model=args.model, delay=args.delay)
+        run_annotate(domain, raw_path, out_dir, ann_key,
+                     model=ann_model, delay=args.delay,
+                     provider=provider, base_url=ann_base_url)
 
 
 if __name__ == "__main__":
